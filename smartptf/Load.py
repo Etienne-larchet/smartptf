@@ -88,9 +88,10 @@ class Indice(BaseModel):
             self.csv_data_path = directory / f"{self.name}_ohlcv_{self.date_start}_to_{self.date_end}.csv"
             self._data = pl.read_csv(self.csv_data_path)
             logger.info(f'Data loaded from "{self.csv_data_path}"')
-        except Exception as e:
-            logger.error(f'Error loading data from "{self.csv_data_path}": {e}')
-            raise
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f"File not found: {self.csv_data_path}") from e
+        except OSError as e:
+            raise OSError(f"IO error while loading data from {self.csv_data_path}") from e
     
     def load_from_eodhd(self) -> None:
         raise NotImplementedError("EODHD API loading not implemented yet")
@@ -108,8 +109,7 @@ class Indice(BaseModel):
             self._data.write_csv(self.csv_data_path)
             logger.info(f'Data saved to "{self.csv_data_path}"')
         except Exception as e:
-            logger.error(f'Error saving data to "{self.csv_data_path}": {e}')
-            raise
+            raise RuntimeError("An error occurred while saving data to CSV") from e
 
     @property
     def open(self) -> pl.DataFrame:
