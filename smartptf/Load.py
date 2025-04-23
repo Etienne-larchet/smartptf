@@ -113,16 +113,16 @@ class Indice(BaseModel):
 
     @property
     def open(self) -> pl.DataFrame:
-        return self._data.select(pl.col('^.*_Open$'))
+        return self._data.select((pl.col('Date'), pl.col('^.*_Open$')))
     @property
     def close(self) -> pl.DataFrame:
-        return self._data.select(pl.col('^.*_Close$'))
+        return self._data.select((pl.col('Date'), pl.col('^.*_Close$')))
     @property
     def low(self) -> pl.DataFrame:
-        return self._data.select(pl.col('^.*_Low$'))
+        return self._data.select((pl.col('Date'), pl.col('^.*_Low$')))
     @property
     def high(self) -> pl.DataFrame:
-        return self._data.select(pl.col('^.*_High$'))
+        return self._data.select((pl.col('Date'), pl.col('^.*_High$')))
     @property
     def volume(self) -> pl.DataFrame:
-        return self._data.select(pl.col('^.*_Volume$'))
+        return self._data.select((pl.col('Date'), pl.col('^.*_Volume$')))
