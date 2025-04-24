@@ -1,17 +1,98 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import date
+from io import StringIO
 from pathlib import Path
-from typing import override
+from time import sleep
+from typing import Literal, override
 
 import polars as pl
+import requests
 import yfinance as yf
 from pydantic import BaseModel, Field, PrivateAttr, validate_call
+from tqdm import tqdm
 
 from smartptf.config import DATA_DIR
+from smartptf.utils import force_list
 
 from .utils import Period, relativedelta_str
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Eodhd:
+    api_key: str = field(repr=False)
+    base_url: str = "https://eodhd.com/api"
+
+    @force_list('tickers')
+    def get_historical(
+        self, 
+        tickers: str | list[str], 
+        from_date: date | str, 
+        to_date: date | str, 
+        period: Literal['d', 'w', 'm'] = 'm', 
+        order: Literal['a', 'd'] = 'a', 
+        fmt: Literal['csv', 'json'] = 'csv'
+        ) -> pl.DataFrame:
+
+        params = {
+                "api_token": self.api_key,
+                "period": period,
+                "from": from_date,
+                "to": to_date,
+                "order": order,
+                "fmt": fmt,
+            }
+        full_lf = pl.DataFrame(schema={"Date": pl.Date}).lazy()
+        with ThreadPoolExecutor() as executor:
+            futures = {executor.submit(self._get_historical_one_thread, ticker=ticker, params=params): ticker for ticker in tickers}  # noqa: E501
+            with tqdm(total=len(tickers), desc="Fetching historical prices", unit='ticker') as pbar:
+                for future in as_completed(futures):
+                    ticker = futures[future]
+                    try:
+                        df = future.result()
+                        lf = df.lazy()
+                        full_lf = full_lf.join(lf, on='Date', how='full', coalesce=True)
+                    except Exception as exc:
+                        print(f'Fetching data with ticker: {ticker} generated an exception: {exc}')
+                    finally:
+                        pbar.update(1)
+        full_df = full_lf.collect()
+        return full_df
+
+    def _get_historical_one_thread(self, ticker: str, params: dict) -> pl.DataFrame:
+        url =  f"{self.base_url}/eod/{ticker}"
+        res = requests.get(url, params=params)
+        match res.status_code:
+            case 429:
+                logger.warning(f"Rate limit exceeded for ticker {ticker}. Retrying in 20 seconds...")
+                sleep(20)
+                return self._get_historical_one_thread(ticker, params)
+            case 200:
+                ...
+            case _:
+                raise requests.exceptions.HTTPError(
+                    f"Error code {res.status_code} while fetching data from ticker {ticker}: {res.text}"
+                )
+        if params['fmt'] == 'csv':
+            df = pl.read_csv(StringIO(res.text), schema_overrides={"Date": date})
+            
+            adj_coef = df['Adjusted_close'] / df['Close']
+            df2 = df.select( [
+                                pl.col('Date'),
+                                pl.col('Open') * adj_coef, 
+                                pl.col('High') * adj_coef,
+                                pl.col('Low') * adj_coef,
+                                pl.col('Adjusted_close').alias('Close'),
+                                pl.col('Volume')] 
+            )
+            
+            df2.columns = [df2.columns[0]] + [f'{ticker}_{col}' for col in df2.columns[1:]]
+            return df2
+        else:
+            raise ValueError("JSON format not implemented yet")
 
 
 class Indice(BaseModel):
@@ -23,8 +104,29 @@ class Indice(BaseModel):
     date_start: date | None = None # Either specify a starting date either specify a period
     period: Period | None  = None
     compo: list[str] = Field(default=None, init=False)
-    _data: pl.DataFrame = PrivateAttr(default=None)
     csv_data_path: str = Field(default=None, init=False)
+    _data: pl.DataFrame = PrivateAttr(default=None)
+    _eodhd_client: Eodhd = PrivateAttr(default=None)
+
+    def __init__(
+            self,
+            name: str, 
+            csv_compo_path: str | Path, 
+            date_end: date  | None = None, 
+            date_start: date | None = None,
+            period: Period | None  = None,
+            eodhd_key: str | None = None):
+        
+        super().__init__(
+            name=name,
+            csv_compo_path=csv_compo_path,
+            date_end=date_end,
+            date_start=date_start,
+            period=period,
+        )
+        
+        if eodhd_key is not None:
+            self._eodhd_client = Eodhd(api_key=eodhd_key)
 
     @override
     def model_post_init(self, _) -> None:
@@ -86,15 +188,22 @@ class Indice(BaseModel):
                 directory = Path(directory)
 
             self.csv_data_path = directory / f"{self.name}_ohlcv_{self.date_start}_to_{self.date_end}.csv"
-            self._data = pl.read_csv(self.csv_data_path)
+            self._data = pl.read_csv(self.csv_data_path, schema_overrides={"Date": date})
             logger.info(f'Data loaded from "{self.csv_data_path}"')
         except FileNotFoundError as e:
             raise FileNotFoundError(f"File not found: {self.csv_data_path}") from e
         except OSError as e:
             raise OSError(f"IO error while loading data from {self.csv_data_path}") from e
     
-    def load_from_eodhd(self) -> None:
-        raise NotImplementedError("EODHD API loading not implemented yet")
+    def load_from_eodhd(self, threshold_missing_val: float = 0.03) -> None:
+        if self._eodhd_client is None:
+            raise ValueError("EODHD API key was not provided")
+        self._data = self._eodhd_client.get_historical(
+            tickers=self.compo,
+            from_date=self.date_start,
+            to_date=self.date_end
+        )
+                
     
     def to_csv(self, directory: str | Path | None = None) -> None:
         if self._data is None:

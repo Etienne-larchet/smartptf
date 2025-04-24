@@ -1,9 +1,11 @@
 import argparse
 
+from dotenv import load_dotenv
+
 from .config import DATA_DIR
 from .logging_config import configure_logging
-from .utils.Load import Indice
 
+load_dotenv()
 configure_logging()
 
 
@@ -21,12 +23,7 @@ def main():
         default=None,
         help="Reference date for Index composition (YYYY-MM-DD)",
     )
-    args = parser.parse_args()
-
-    sp500 = Indice(name='SP500', csv_compo_path=args.csv_path, date_end=args.date, period="4y")
-    sp500.load_from_csv()
-    print(sp500.open)
-
+     # See exemples of use in test folder
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,6 @@
 import pytest
 
-from smartptf.DPT.dpt import Dpt
+from smartptf.dpt import Dpt
 from smartptf.Load import Indice
 
 
