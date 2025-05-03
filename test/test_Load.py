@@ -4,16 +4,19 @@ import pytest
 from dotenv import load_dotenv
 
 from smartptf.Load import Indice
+from smartptf.logging_config import configure_logging
 
 load_dotenv()
+configure_logging()
+
 
 @pytest.fixture
 def sp500():
     return Indice(
         name="SP500",
         csv_compo_path="test/data/sp500_compo_until_2025-03-10.csv",
-        date_end="2024-03-10",
-        period="4y",
+        date_end="2020-01-01",
+        period="16y",
         eodhd_key=os.getenv("EODHD_API_KEY")
     )
 

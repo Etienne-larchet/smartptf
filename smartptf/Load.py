@@ -10,13 +10,12 @@ from typing import Literal, override
 import polars as pl
 import requests
 import yfinance as yf
+from dateutil.relativedelta import relativedelta
 from pydantic import BaseModel, Field, PrivateAttr, validate_call
 from tqdm import tqdm
 
 from smartptf.config import DATA_DIR
-from smartptf.utils import force_list
-
-from .utils import Period, relativedelta_str
+from smartptf.utils import Period, force_list, relativedelta_str
 
 logger = logging.getLogger(__name__)
 
@@ -32,34 +31,46 @@ class Eodhd:
         tickers: str | list[str], 
         from_date: date | str, 
         to_date: date | str, 
-        period: Literal['d', 'w', 'm'] = 'm', 
+        interval: Literal['d', 'w', 'm'] = 'm', 
         order: Literal['a', 'd'] = 'a', 
-        fmt: Literal['csv', 'json'] = 'csv'
+        fmt: Literal['csv', 'json'] = 'csv',
+        display_progress: bool = True
         ) -> pl.DataFrame:
 
         params = {
                 "api_token": self.api_key,
-                "period": period,
+                "period": interval, # Change of lexic for convention ('period' in eodhd being equivalent to 'interval' in yfinance)
                 "from": from_date,
                 "to": to_date,
                 "order": order,
                 "fmt": fmt,
             }
         full_lf = pl.DataFrame(schema={"Date": pl.Date}).lazy()
+        missing_tickers = []
+        logger.info('Fetching historical prices from EODHD API...')
         with ThreadPoolExecutor() as executor:
             futures = {executor.submit(self._get_historical_one_thread, ticker=ticker, params=params): ticker for ticker in tickers}  # noqa: E501
-            with tqdm(total=len(tickers), desc="Fetching historical prices", unit='ticker') as pbar:
+            with tqdm(total=len(tickers), desc="Fetching historical prices", unit='ticker', disable= not display_progress) as pbar:
                 for future in as_completed(futures):
                     ticker = futures[future]
                     try:
                         df = future.result()
                         lf = df.lazy()
                         full_lf = full_lf.join(lf, on='Date', how='full', coalesce=True)
-                    except Exception as exc:
-                        print(f'Fetching data with ticker: {ticker} generated an exception: {exc}')
+                    except Exception as e:
+                        logger.debug(f'Fetching data with ticker: {ticker} generated an exception: {e}')
+                        missing_tickers.append(ticker)
                     finally:
                         pbar.update(1)
+        full_lf = full_lf.sort('Date', descending=False)
+        if interval == 'm':
+            full_lf = full_lf.with_columns(pl.col('Date').dt.month_end().alias('Date'))
+            expressions = [pl.col(c).filter(pl.col(c).is_not_null()).first().alias(c) for c in full_lf.columns[1:]]
+            full_lf = full_lf.group_by('Date').agg(expressions).sort('Date', descending=False)  # Re sorting after group_by to ensure order of date
+        if missing_tickers:
+            logger.warning(f"Missing tickers: {missing_tickers}")
         full_df = full_lf.collect()
+        logger.info(f"{len(full_df)} tickers fetched from EODHD API")
         return full_df
 
     def _get_historical_one_thread(self, ticker: str, params: dict) -> pl.DataFrame:
@@ -103,42 +114,33 @@ class Indice(BaseModel):
     date_end: date  | None = None
     date_start: date | None = None # Either specify a starting date either specify a period
     period: Period | None  = None
+    eodhd_key: str | None = None
     compo: list[str] = Field(default=None, init=False)
     csv_data_path: str = Field(default=None, init=False)
     _data: pl.DataFrame = PrivateAttr(default=None)
     _eodhd_client: Eodhd = PrivateAttr(default=None)
 
-    def __init__(
-            self,
-            name: str, 
-            csv_compo_path: str | Path, 
-            date_end: date  | None = None, 
-            date_start: date | None = None,
-            period: Period | None  = None,
-            eodhd_key: str | None = None):
-        
-        super().__init__(
-            name=name,
-            csv_compo_path=csv_compo_path,
-            date_end=date_end,
-            date_start=date_start,
-            period=period,
-        )
-        
-        if eodhd_key is not None:
-            self._eodhd_client = Eodhd(api_key=eodhd_key)
-
     @override
     def model_post_init(self, _) -> None:
-        if self.date_end is None:
+        # Date End conversion
+        if self.date_end is None or self.date_end > date.today():
             self.date_end = date.today()
+        if (self.date_end + relativedelta(days=1)).month == self.date_end.month: # Making sure date_end is not already the last day of the month
+            self.date_end = self.date_end + relativedelta(day=1, days=-1) # Get the last day of the month
+
+        # Date Start conversion
         if self.period is None and self.date_start is None:
             raise ValueError("Either date_start or period must be specified")
         if self.period is not None and self.date_start is not None:
             raise ValueError("Either date_start or period must be specified, not both")
         if self.period is not None:
-            self.date_start = self.date_end - relativedelta_str(self.period)
+            self.date_start = self.date_end - relativedelta_str(self.period) - relativedelta(months=1) # Add one month to get exact period of returns
 
+        # Init of EODHD client
+        if self.eodhd_key is not None:
+            self._eodhd_client = Eodhd(api_key=self.eodhd_key)
+
+        # Getting Composition of the index
         self.compo = self.get_composition(self.date_end)
 
     @validate_call(validate_return=True)
@@ -165,7 +167,6 @@ class Indice(BaseModel):
             keepna=True # Keep control on missing values
         )
         tickers = df.columns.levels[0]
-        logger.info(f"Data loaded for {len(tickers)} tickers")
         drop_list = { ticker for ticker in tickers if df[ticker, "Close"].isna().mean() > threshold_missing_val}
         if drop_list:
             logger.info(f"{len(drop_list)} tickers dropped due to missing data > {threshold_missing_val:.2%}")
@@ -195,15 +196,19 @@ class Indice(BaseModel):
         except OSError as e:
             raise OSError(f"IO error while loading data from {self.csv_data_path}") from e
     
-    def load_from_eodhd(self, threshold_missing_val: float = 0.03) -> None:
+    def load_from_eodhd(self, threshold_missing_val: float = 0.03, display_progress: bool = True) -> None:
         if self._eodhd_client is None:
             raise ValueError("EODHD API key was not provided")
         self._data = self._eodhd_client.get_historical(
             tickers=self.compo,
             from_date=self.date_start,
-            to_date=self.date_end
+            to_date=self.date_end,
+            display_progress=display_progress
         )
-                
+        dropping_tickers = [col.removesuffix('_Close') for col in self.close.columns if self.close[col].is_null().mean() > threshold_missing_val]
+        logger.warning(f"{len(dropping_tickers)} tickers dropped due to missing data > {threshold_missing_val:.2%}")
+        logger.debug(f"Tickers dropped: {dropping_tickers}")
+        self._data = self._data.select(col for col in self._data.columns if col.split("_")[0] not in dropping_tickers)
     
     def to_csv(self, directory: str | Path | None = None) -> None:
         if self._data is None:
