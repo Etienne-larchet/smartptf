@@ -2,10 +2,10 @@ import os
 
 import pytest
 from dotenv import load_dotenv
+from smartptf.models.dpt import DPT
+from smartptf.models.Load import Indice
 
-from smartptf.dpt import DPT
-from smartptf.Load import Indice
-from smartptf.logging_config import configure_logging
+from config.logging_config import configure_logging
 
 load_dotenv()
 configure_logging()

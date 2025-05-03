@@ -1,4 +1,4 @@
-from smartptf.utils import force_list
+from smartptf.utils.utils import force_list
 
 
 def test_force_list():
