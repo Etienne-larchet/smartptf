@@ -1,16 +1,15 @@
 from dataclasses import dataclass, field
-from typing import Literal
 
 import numpy as np
 import polars as pl
-import polars.selectors as cs
+import pulp as plp
 from scipy.signal import coherence, csd, welch
+
+from utils.polars import TimesSeriesPolars
 
 
 @dataclass
-class DPT:
-    data: pl.DataFrame
-    index_ticker: str
+class DPT(TimesSeriesPolars):
     R: np.ndarray = field(default=None, init=False)
     csd: np.ndarray = field(default=None, init=False)
     coherence: np.ndarray = field(default=None, init=False)
@@ -24,9 +23,8 @@ class DPT:
             for col in self.data.columns
             if col.endswith("Close")
         )
-        self._calculate_signals()
 
-    def _calculate_signals(self, T: int = 48, dt: int = 1):
+    def calculate_signals(self, T: int = 48, dt: int = 1):
         fs = 1 / dt
         spectral_params = dict(fs=fs, nperseg=T, noverlap=T // 2, window="boxcar")
 
@@ -46,23 +44,86 @@ class DPT:
         _, self.coherence = coherence(assets_logR, index_logR, **spectral_params)
         self.coherence = self.coherence[:, 1:]  # Remove the first element (frequency 0)
         ## Phase shift
-        self.phase_shift = np.angle(self.csd)  # Phase from cross-spectrum
+        self.theta = np.angle(self.csd)  # Phase from cross-spectrum, use to convert complex to real
 
-    def portfolio_variance(self, weights, phase_shift: float):
-        _, K = self.R.shape
-        variance = 0.0
-        for k in range(K):
-            beta_sum = np.sum(weights * self.R[k] * np.cos(phase_shift[k, :]))
-            alpha_sum = np.sum(weights * self.R[k] * np.sin(phase_shift[k, :]))
-            variance += beta_sum**2 + alpha_sum**2
+    def solve(
+        self, C_betas: dict[int, float], C_alphas: dict[int, float], L: dict[int, float], S: int, mu: dict[str, float]
+    ) -> None:
+        # K: Number of periodic components (e.g., 24 for T=48 months)
+        # securities: List of security identifiers [j=0 to N-1]
+        # periods: List of period identifiers [k=0 to K-1]
+        # mu: Dictionary {j: expected_return_j}
+        # R: Dictionary {(k, j): R_kj} (Std deviation of kth period return for security j)
+        # cos_theta: Dictionary {(k, j): cos(theta_kmj)} (Systematic component factor)
+        # sin_theta: Dictionary {(k, j): sin(theta_kmj)} (Unsystematic component factor)
 
-        return 1 / 2 * variance
+        # C_betas: Dictionary {k: C_beta_k} (RHS for systematic risk constraints)
+        # C_alphas: Dictionary {k: C_alpha_k} (RHS for unsystematic risk constraints)
+        # S: Desired number of securities in the portfolio
+        # L: Dictionary {j: L_j} (Minimum investment fraction for security j)
 
-    def get(
-        self, cat: Literal["Close", "logR"], include_index: bool = False, include_date: bool = True
-    ) -> pl.DataFrame:
-        query = [pl.col("Date")] if include_date else []
-        query += [pl.col(f"{self.index_ticker}_{cat}")] if include_index else []
-        query += [cs.ends_with(f"_{cat}") - cs.starts_with(self.index_ticker)]
-        result = self.data.select(query).drop_nulls()
-        return result.rename({col: col.replace(f"_{cat}", "") for col in result.columns})
+        dpt_problem = plp.LpProblem("DPT_Optimization", plp.LpMaximize)
+        cos_theta = {k: np.cos(self.theta[k]) for k in range(self.R.shape[0])}
+        sin_theta = {k: np.sin(self.theta[k]) for k in range(self.R.shape[0])}
+        periods = range(self.R.shape[0])  # Assuming R is a 2D array with shape (K, N)
+        securities = range(len(self.tickers))
+
+        # Continuous weight variables (w_j)
+        weights = plp.LpVariable.dicts("w", securities, lowBound=0, cat="Continuous")
+
+        # Binary variables (z_j) to indicate if a security is selected
+        selection = plp.LpVariable.dicts("z", securities, cat="Binary")  # z_j = 0 or 1
+
+        # --- 4. Define Objective Function ---
+        # Maximize expected portfolio return
+        dpt_problem += plp.lpSum(mu[j] * weights[j] for j in securities), "Total Expected Return"
+
+        # --- 5. Define Constraints ---
+        # Budget Constraint: Sum of weights = 1
+        dpt_problem += plp.lpSum(weights[j] for j in securities) == 1, "Budget Constraint"
+
+        # Risk Constraints (Systematic and Unsystematic for each period k)
+        for k in periods:
+            # Systematic Risk (Beta)
+            dpt_problem += (
+                plp.lpSum(weights[j] * R[k, j] * cos_theta[k, j] for j in securities) <= C_betas[k],
+                f"Systematic_Risk_Upper_{k}",
+            )
+            dpt_problem += (
+                plp.lpSum(weights[j] * R[k, j] * cos_theta[k, j] for j in securities) >= -C_betas[k],
+                f"Systematic_Risk_Lower_{k}",
+            )
+
+            # Unsystematic Risk (Alpha)
+            dpt_problem += (
+                plp.lpSum(weights[j] * R[k, j] * sin_theta[k, j] for j in securities) <= C_alphas[k],
+                f"Unsystematic_Risk_Upper_{k}",
+            )
+            dpt_problem += (
+                plp.lpSum(weights[j] * R[k, j] * sin_theta[k, j] for j in securities) >= -C_alphas[k],
+                f"Unsystematic_Risk_Lower_{k}",
+            )
+
+        # Portfolio Size Constraint: Sum of selection variables = S [cite: 330]
+        dpt_problem += plp.lpSum(selection[j] for j in securities) == S, "Portfolio Size"
+
+        # Linking Constraints and Minimum Holding [cite: 330]
+        for j in securities:
+            # w_j <= z_j (Simplified as w_j <= 1 * z_j since max w_j is 1)
+            dpt_problem += weights[j] <= selection[j], f"Link_Upper_{j}"
+            # w_j >= L_j * z_j
+            dpt_problem += weights[j] >= L[j] * selection[j], f"Link_Lower_Min_Holding_{j}"
+
+        # --- 6. Solve the Problem ---
+        # You might need to specify a solver that handles MILP, e.g., CBC (default), GLPK, CPLEX, Gurobi
+        # dpt_problem.solve(pulp.PULP_CBC_CMD(msg=1)) # Example using CBC
+        dpt_problem.solve()
+
+        # --- 7. Output Results ---
+        print("Status:", plp.LpStatus[dpt_problem.status])
+        print("Optimal Portfolio Return:", plp.value(dpt_problem.objective))
+        print("Optimal Weights:")
+        for j in securities:
+            if selection[j].varValue > 0.5:  # Check if security j is selected
+                print(f"  Security {j}: {weights[j].varValue:.4f}")
+        print("Number of Securities in Portfolio:", sum(selection[j].varValue for j in securities))

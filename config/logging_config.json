@@ -10,7 +10,8 @@
       "console": {
         "level": "DEBUG",
         "class": "logging.StreamHandler",
-        "formatter": "short"
+        "formatter": "short",
+        "stream": "ext://sys.stdout"
       }
     },
     "loggers": {
