@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Literal
 
 import polars as pl
 from statsforecast import StatsForecast
@@ -11,7 +12,9 @@ from utils.polars import TimesSeriesPolars
 class Predict(TimesSeriesPolars):
     index_ticker: str = "GSPC.INDX"  # TODO Transform to variable
 
-    def arima(self, auto: bool = True, order: tuple | None = None) -> pl.DataFrame:  # TODO graph the auto correlation
+    def arima(
+        self, auto: bool = True, order: tuple | None = None, output: Literal["polars", "dict"] = "dict"
+    ) -> pl.DataFrame | dict[str, float]:  # TODO graph the auto correlation
         if auto:
             model = AutoARIMA(season_length=12, trace=True)
         else:
@@ -20,16 +23,25 @@ class Predict(TimesSeriesPolars):
         sf = StatsForecast(models=[model], freq="1mo", n_jobs=-1, verbose=True)
 
         returns = self.get("logR", include_index=False, include_date=True)
-        returns2 = returns.melt(id_vars="Date", variable_name="tickers", value_name="logR")
+        returns2 = returns.melt(
+            id_vars="Date", variable_name="tickers", value_name="logR"
+        )  # TODO melt is depreciated, use unpivot
 
         model_fit = sf.fit(df=returns2, id_col="tickers", time_col="Date", target_col="logR")
         forecasts = model_fit.predict(1)
         forecasts2 = forecasts.pivot(values="AutoARIMA", index="Date", columns="tickers").drop("Date")
-        return forecasts2
+        if output == "polars":
+            return forecasts2
+        return forecasts2.to_dicts()[0]
 
-    def moving_average(self, window: int = 0) -> pl.DataFrame:
+    def moving_average(
+        self, window: int = 0, output: Literal["polars", "dict"] = "dict"
+    ) -> pl.DataFrame | dict[str, float]:
         returns = self.get("logR", include_index=False, include_date=False)
-        return returns[-window:].mean()
+        mean = returns[-window:].mean()
+        if output == "polars":
+            return mean
+        return mean.to_dicts()[0]
 
     def exponential_smoothing(self):
         raise NotImplementedError("Exponential smoothing prediction is not implemented yet.")
