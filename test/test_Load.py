@@ -4,7 +4,7 @@ import pytest
 from dotenv import load_dotenv
 
 from config.logging_config import configure_logging
-from models.Load import Indice
+from models.Load import MarketIndex, MarkKetIndexComponents
 
 load_dotenv("config/.env")
 configure_logging()
@@ -12,12 +12,10 @@ configure_logging()
 
 @pytest.fixture
 def sp500():
-    return Indice(
-        name="SP500",
-        csv_compo_path="test/data/sp500_compo_until_2025-03-10.csv",
-        date_end="2020-01-01",
-        period="16y",
-        eodhd_key=os.getenv("EODHD_API_KEY"),
+    components = MarkKetIndexComponents(csv_compo_path="test/data/sp500_compo_until_2025-03-10.csv")
+    compo = components.get_composition(date_ref="2020-01-01")
+    return MarketIndex(
+        name="SP500", compo=compo, date_end="2020-01-01", period="16y", eodhd_key=os.getenv("EODHD_API_KEY")
     )
 
 

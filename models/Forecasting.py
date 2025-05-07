@@ -9,7 +9,7 @@ from utils.polars import TimesSeriesPolars
 
 
 @dataclass
-class Predict(TimesSeriesPolars):
+class Forecast(TimesSeriesPolars):
     index_ticker: str = "GSPC.INDX"  # TODO Transform to variable
 
     def arima(

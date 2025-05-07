@@ -5,18 +5,21 @@ from datetime import date
 from io import StringIO
 from pathlib import Path
 from time import sleep
-from typing import Literal, override
+from typing import Literal
 
 import polars as pl
 import requests
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, validate_call
 from tqdm import tqdm
 
+from utils.polars import TimesSeriesPolars
 from utils.utils import Period, force_list, relativedelta_str
 
 logger = logging.getLogger(__name__)
+
+
+INDEX_HISTO_PATH = Path("data/index_historical/")
 
 
 @dataclass
@@ -114,22 +117,33 @@ class Eodhd:
             raise ValueError("JSON format not implemented yet")
 
 
-class Indice(BaseModel):
-    model_config = ConfigDict(extra="allow")
+@dataclass
+class MarkKetIndexComponents:
+    csv_path: str | Path
+    data: pl.DataFrame = field(default=None, init=False)
 
+    def __post_init__(self) -> None:
+        self.data = pl.read_csv(self.csv_path, schema_overrides={"date": date})
+
+    def get_composition(self, date_ref: date) -> list[str]:
+        tickers_str = self.data.filter(pl.col("date") <= date_ref).sort("date").tail(1).select("tickers").item()
+        return tickers_str.split(",")
+
+
+@dataclass
+class MarketIndex(TimesSeriesPolars):
     name: str
-    csv_compo_path: str | Path
+    compo: list[str]
     date_end: date | None = None
     date_start: date | None = None  # Either specify a starting date either specify a period
-    period: Period | None = None
+    period: Period | relativedelta | None = None
     eodhd_key: str | None = None
-    compo: list[str] = Field(default=None, init=False)
-    csv_data_path: str = Field(default=None, init=False)
-    _data: pl.DataFrame = PrivateAttr(default=None)
-    _eodhd_client: Eodhd = PrivateAttr(default=None)
+    csv_data_path: str = field(default=None, init=False)
+    data: pl.DataFrame = field(default=None, init=False)
+    _eodhd_client: Eodhd = field(default=None, init=False)
+    _period_delta: relativedelta = field(default=None, init=False)
 
-    @override
-    def model_post_init(self, _) -> None:
+    def __post_init__(self) -> None:
         # Date End conversion
         if self.date_end is None or self.date_end > date.today():
             self.date_end = date.today()
@@ -144,24 +158,16 @@ class Indice(BaseModel):
         if self.period is not None and self.date_start is not None:
             raise ValueError("Either date_start or period must be specified, not both")
         if self.period is not None:
-            self.date_start = (
-                self.date_end - relativedelta_str(self.period) - relativedelta(months=1)
-            )  # Add one month to get exact period of returns
+            if isinstance(self.period, relativedelta):
+                self._period_delta = self.period + relativedelta(months=1)  # One monh buffer for convertion in returns
+            else:
+                self._period_delta = relativedelta_str(self.period) + relativedelta(months=1)
+            self.date_start = self.date_end - self._period_delta
 
         # Init of EODHD client
         if self.eodhd_key is not None:
             self._eodhd_client = Eodhd(self.eodhd_key)
 
-        # Getting Composition of the index
-        self.compo = self.get_composition(self.date_end)
-
-    @validate_call(validate_return=True)
-    def get_composition(self, date_ref: date) -> list[str]:
-        df = pl.read_csv(self.csv_compo_path, schema_overrides={"date": date})
-        tickers_str = df.filter(pl.col("date") <= date_ref).sort("date").tail(1).select("tickers").item()
-        return tickers_str.split(",")
-
-    @validate_call
     def load_from_yahoo(self, threshold_missing_val: float = 0.03) -> None:
         df = yf.download(
             self.compo,
@@ -183,18 +189,18 @@ class Indice(BaseModel):
         col_names = [f"{ticker}_{col}" for ticker, col in df2.columns]
         df2.columns = col_names
         df3 = df2.reset_index()  # Transform index Date into a column, to be extracted by polars
-        self._data = pl.from_pandas(df3)
+        self.data = pl.from_pandas(df3)
 
         logger.info("Data transformed to Polars DataFrame")
 
     def load_from_csv(self, directory: str | Path | None = None) -> None:
         try:
             if directory is None:
-                directory = Path("data/")
+                directory = INDEX_HISTO_PATH
             elif isinstance(directory, str):
                 directory = Path(directory)
             self.csv_data_path = directory / f"{self.name}_ohlcv_{self.date_start}_to_{self.date_end}.csv"
-            self._data = pl.read_csv(self.csv_data_path, schema_overrides={"Date": date})
+            self.data = pl.read_csv(self.csv_data_path, schema_overrides={"Date": date})
             logger.info(f'Data loaded from "{self.csv_data_path}"')
         except FileNotFoundError as e:
             raise FileNotFoundError(f"File not found: {self.csv_data_path}") from e
@@ -204,7 +210,7 @@ class Indice(BaseModel):
     def load_from_eodhd(self, threshold_missing_val: float = 0.03, display_progress: bool = True) -> None:
         if self._eodhd_client is None:
             raise ValueError("EODHD API key was not provided")
-        self._data = self._eodhd_client.get_historical(
+        self.data = self._eodhd_client.get_historical(
             tickers=self.compo, from_date=self.date_start, to_date=self.date_end, display_progress=display_progress
         )
         dropping_tickers = [
@@ -214,43 +220,39 @@ class Indice(BaseModel):
         ]
         logger.warning(f"{len(dropping_tickers)} tickers dropped due to missing data > {threshold_missing_val:.2%}")
         logger.debug(f"Tickers dropped: {dropping_tickers}")
-        self._data = self._data.select(col for col in self._data.columns if col.split("_")[0] not in dropping_tickers)
+        self.data = self.data.select(col for col in self.data.columns if col.split("_")[0] not in dropping_tickers)
 
     def to_csv(self, directory: str | Path | None = None) -> None:
-        if self._data is None:
+        if self.data is None:
             raise ValueError("Data is not loaded yet")
         if directory is None:
-            directory = Path("data/")
+            directory = INDEX_HISTO_PATH
         elif isinstance(directory, str):
             directory = Path(directory)
 
         self.csv_data_path = directory / f"{self.name}_ohlcv_{self.date_start}_to_{self.date_end}.csv"
         try:
-            self._data.write_csv(self.csv_data_path)
+            self.data.write_csv(self.csv_data_path)
             logger.info(f'Data saved to "{self.csv_data_path}"')
         except Exception as e:
             raise RuntimeError("An error occurred while saving data to CSV") from e
 
     @property
     def open(self) -> pl.DataFrame:
-        return self._data.select((pl.col("Date"), pl.col("^.*_Open$")))
+        return self.get("Open")
 
     @property
     def close(self) -> pl.DataFrame:
-        return self._data.select((pl.col("Date"), pl.col("^.*_Close$")))
+        return self.get("Close")
 
     @property
     def low(self) -> pl.DataFrame:
-        return self._data.select((pl.col("Date"), pl.col("^.*_Low$")))
+        return self.get("Low")
 
     @property
     def high(self) -> pl.DataFrame:
-        return self._data.select((pl.col("Date"), pl.col("^.*_High$")))
+        return self.get("High")
 
     @property
     def volume(self) -> pl.DataFrame:
-        return self._data.select((pl.col("Date"), pl.col("^.*_Volume$")))
-
-    @override
-    def __hash__(self) -> int:
-        return hash((self.name, self.date_start, self.date_end, self.period, self.eodhd_key))
+        return self.get("Volume")

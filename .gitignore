@@ -53,8 +53,9 @@ logs/
 debug.log
 
 #Data
+data/**/*.*
 data/*
-!data/*/
+!data/**/
 
 
 # Environment variables

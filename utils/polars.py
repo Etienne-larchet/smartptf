@@ -7,7 +7,7 @@ import polars.selectors as cs
 TimesSeriesCol = Literal["Close", "Low", "High", "Close", "Volume", "logR"]
 
 
-@dataclass
+@dataclass(kw_only=True)
 class TimesSeriesPolars:
     data: pl.DataFrame
     index_ticker: str | None = None

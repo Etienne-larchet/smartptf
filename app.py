@@ -8,10 +8,11 @@ configure_logging()
 
 
 # --- PAGE SETUP ---
-load_page = st.Page("views/load.py", title="Load", default=True)
+page_import = st.Page("views/pageImport.py", title="Import", default=True)
+page_export = st.Page("views/pageExport.py", title="Export")
+page_fourier = st.Page("views/pageFourierAnalysis.py", title="Fourier Analysis")
+page_forecasting = st.Page("views/pageForecasting.py", title="Forecasting")
+page_solver = st.Page("views/pageSolver.py", title="Solve")
 
-dpt_page = st.Page("views/dpt.py", title="DPT")
-
-
-pg = st.navigation([load_page, dpt_page])
+pg = st.navigation({"Settings": [page_import, page_export], "DPT": [page_fourier, page_forecasting, page_solver]})
 pg.run()

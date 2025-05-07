@@ -1,36 +1,20 @@
-import os
-
 import pytest
 from dotenv import load_dotenv
 
 from config.logging_config import configure_logging
 from models.Dpt import DPT
-from models.Load import Indice
-from models.Prediction import Predict
+from models.Forecasting import Predict
+from models.Load import MarketIndex, MarkKetIndexComponents
 
 load_dotenv("config/.env")
 configure_logging()
 
 
 @pytest.fixture
-def sp500_eo():
-    sp500 = Indice(
-        name="SP500",
-        csv_compo_path="test/data/sp500_compo_until_2025-03-10.csv",
-        date_end="2020-01-10",
-        period="16y",
-        eodhd_key=os.getenv("EODHD_API_KEY"),
-    )
-    sp500.compo += ["GSPC.INDX"]
-    sp500.load_from_eodhd(threshold_missing_val=0.001, display_progress=False)
-    return sp500
-
-
-@pytest.fixture
 def sp500_csv():
-    sp500 = Indice(
-        name="SP500", csv_compo_path="test/data/sp500_compo_until_2025-03-10.csv", date_end="2020-01-10", period="16y"
-    )
+    components = MarkKetIndexComponents(csv_compo_path="test/data/sp500_compo_until_2025-03-10.csv")
+    compo = components.get_composition(date_ref="2020-01-01")
+    sp500 = MarketIndex(name="SP500", compo=compo, date_end="2020-01-10", period="16y")
     sp500.load_from_csv()
     return sp500
 
