@@ -58,7 +58,9 @@ class DPT(TimesSeriesPolars):
             for col in self.data.columns
             if col.endswith("Close")
         )
-        self.log_returns = self.get("logR", include_index=True, include_date=False)
+        sorted_columns = ["Date"] + sorted(self.get(include_date=False, include_index=True).columns)
+        self.data = self.data.select(sorted_columns)
+        self.logR = self.get("logR", include_index=True, include_date=False)
         logger.debug("Initializing DPT with provided data.")
 
     def calculate_signals(self, T: int = 48, dt: int = 1):
@@ -66,8 +68,8 @@ class DPT(TimesSeriesPolars):
         fs = 1 / dt
         spectral_params = dict(fs=fs, nperseg=T, noverlap=T // 2, window="boxcar")
 
-        index_logR = self.log_returns[self.index_ticker]
-        assets_logR = self.log_returns.select(pl.all().exclude(self.index_ticker))
+        index_logR = self.logR[self.index_ticker]
+        assets_logR = self.logR.select(pl.all().exclude(self.index_ticker))
 
         # Calculate Fourier Transform
         _, R = welch(assets_logR.transpose(), **spectral_params)

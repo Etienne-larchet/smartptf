@@ -10,7 +10,7 @@ from utils.polars import TimesSeriesPolars
 
 @dataclass
 class Forecast(TimesSeriesPolars):
-    index_ticker: str = "GSPC.INDX"  # TODO Transform to variable
+    index_ticker: str
 
     def arima(
         self, auto: bool = True, order: tuple | None = None, output: Literal["polars", "dict"] = "dict"

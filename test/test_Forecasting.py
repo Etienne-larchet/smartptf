@@ -2,7 +2,7 @@ import pytest
 
 from config.logging_config import configure_logging
 from models.Dpt import DPT
-from models.Forecasting import Predict
+from models.Forecasting import Forecast
 from models.Load import MarketIndex, MarkKetIndexComponents
 
 configure_logging()
@@ -19,12 +19,12 @@ def dpt():
 
 
 def test_moving_average(dpt):
-    predictor = Predict(data=dpt.data)
+    predictor = Forecast(data=dpt.data)
     predictions = predictor.moving_average(window=5)
     assert predictions is not None, "Moving average prediction should be calculated successfully"
 
 
 def test_arima(dpt):
-    predictor = Predict(data=dpt.data)
+    predictor = Forecast(data=dpt.data)
     predictions = predictor.arima()
     assert predictions is not None, "Moving average prediction should be calculated successfully"

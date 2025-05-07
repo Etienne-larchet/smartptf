@@ -7,6 +7,7 @@ import numpy as np
 import streamlit as st
 from dateutil.relativedelta import relativedelta
 
+from components.MemorySession import MemorySession as mm
 from components.PageModels import PageModel, RenderWarning, StreamModel
 from models.Load import MarketIndex, MarkKetIndexComponents
 from utils.utils import Horizon, Period, relativedelta_str
@@ -35,28 +36,40 @@ class BaseDisplay(StreamModel):
             self.load(marketindex)
         if marketindex.data is None:
             raise RenderWarning("Press Load button.")
-        else:
-            data_selection = st.segmented_control(
-                label="Data selection",
-                options=["All", "Open", "High", "Low", "Close", "Volume"],
-                default="All",
-                label_visibility="collapsed",
-            )
-            match data_selection:
-                case "Open":
-                    data = marketindex.open
-                case "High":
-                    data = marketindex.high
-                case "Low":
-                    data = marketindex.low
-                case "Close":
-                    data = marketindex.close
-                case "Volume":
-                    data = marketindex.volume
-                case "All":
-                    data = marketindex.data
-            st.dataframe(data, use_container_width=True)
-        marketindex.to_csv()
+
+        data_selection = st.segmented_control(
+            label="Data selection",
+            options=["All", "Open", "High", "Low", "Close", "Volume"],
+            default="All",
+            label_visibility="collapsed",
+        )
+        data_observation = mm.data_observation
+        data_testing = mm.data_testing
+
+        match data_selection:
+            case "Open":
+                cut_observation = data_observation.open
+                cut_testing = data_testing.open
+            case "High":
+                cut_observation = data_observation.high
+                cut_testing = data_testing.open
+            case "Low":
+                cut_observation = data_observation.low
+                cut_testing = data_testing.low
+            case "Close":
+                cut_observation = data_observation.close
+                cut_testing = data_testing.close
+            case "Volume":
+                cut_observation = data_observation.volume
+                cut_testing = data_testing.volume
+            case "All":
+                cut_observation = data_observation.data
+                cut_testing = data_testing.data
+
+        st.markdown("Data Observation")
+        st.dataframe(cut_observation, use_container_width=True)
+        st.markdown("Data Testing")
+        st.dataframe(cut_testing, use_container_width=True)
 
     @abstractmethod
     def load(self, marketindex: MarketIndex): ...
@@ -122,13 +135,11 @@ class ImportPage(PageModel):
             date_end = st.date_input("End Date", value="2025-01-01")
         with col2:
             observation_period = st.selectbox("Observation Period", Period.__args__, index=2)
-            st.session_state["observation_period"] = observation_period
         with col3:
             testing_period = st.selectbox("Testing Period", Horizon.__args__, index=5)
-            st.session_state["testing_period"] = testing_period
 
         st.subheader("SP500 Composition at date")
-        st.session_state["market_ticker"] = st.text_input("Market ticker", value="GSPC.INDX")
+        st.session_state["index_ticker"] = st.text_input("Index ticker", value="GSPC.INDX")
         csv_compo_path = "./data/index_compo/sp500_compo_until_2025-03-10.csv"
         components = MarkKetIndexComponents(csv_path=csv_compo_path)
         compo_list = components.get_composition(date_end)
@@ -141,6 +152,8 @@ class ImportPage(PageModel):
         )
 
         period = relativedelta_str(observation_period) + relativedelta_str(testing_period)
+        st.session_state["testing_period"] = relativedelta_str(testing_period)
+
         display_map = {"CSV": DisplayCSV, "EODHD": DisplayEODHD, "YahooFinance": DisplayYahoo, "Auto": DisplayAuto}
         display_map[load_method](date_end, period, compo_list).run()
 
