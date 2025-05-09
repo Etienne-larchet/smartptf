@@ -13,10 +13,14 @@ class Forecast(TimesSeriesPolars):
     index_ticker: str
 
     def arima(
-        self, auto: bool = True, order: tuple | None = None, output: Literal["polars", "dict"] = "dict"
+        self,
+        auto: bool = True,
+        order: tuple | None = None,
+        output: Literal["polars", "dict"] = "dict",
+        approximation: bool = True,
     ) -> pl.DataFrame | dict[str, float]:  # TODO graph the auto correlation
         if auto:
-            model = AutoARIMA(season_length=12, trace=True)
+            model = AutoARIMA(season_length=12, approximation=approximation, trace=True)
         else:
             raise NotImplementedError("Setting ARIMA order is not yet implemented")
 

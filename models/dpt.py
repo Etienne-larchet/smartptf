@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 class OptimizedPortfolio:
     weights: pl.DataFrame
     returns: pl.DataFrame
-    betas: pl.DataFrame
-    alphas: pl.DataFrame
+    rawbetas: pl.DataFrame
+    rawalphas: pl.DataFrame
     R: pl.DataFrame
     scaling_factor: float
 
@@ -25,18 +25,31 @@ class OptimizedPortfolio:
         return sum((self.weights * self.returns).row(0))
 
     @property
+    def betas(self) -> pl.DataFrame:
+        return self.rawbetas * self.R * self.scaling_factor
+
+    @property
+    def alphas(self) -> pl.DataFrame:
+        return self.rawalphas * self.R * self.scaling_factor
+
+    @property
+    def weighted_betas(self) -> pl.DataFrame:
+        return self.betas.select(pl.col(col) * self.weights[col] for col in self.weights.columns)
+
+    @property
+    def weighted_alphas(self) -> pl.DataFrame:
+        return self.alphas.select(pl.col(col) * self.weights[col] for col in self.weights.columns)
+
+    @property
     def ptf_betas(self) -> pl.DataFrame:
-        return self._calc_ptf_alphas_betas(self.betas, "ptf_betas")
+        return self._calc_ptf_thetas(self.weighted_betas, "ptf_betas")
 
     @property
     def ptf_alphas(self) -> pl.DataFrame:
-        return self._calc_ptf_alphas_betas(self.alphas, "ptf_alphas")
+        return self._calc_ptf_thetas(self.weighted_alphas, "ptf_betas")
 
-    def _calc_ptf_alphas_betas(self, theta_like: pl.DataFrame, colname: str) -> pl.DataFrame:
-        return pl.DataFrame(
-            (theta_like.to_numpy() * self.R.to_numpy() * self.weights.to_numpy() * self.scaling_factor).sum(axis=1),
-            schema=[colname],
-        )
+    def _calc_ptf_thetas(self, theta_like: pl.DataFrame, colname: str) -> pl.DataFrame:
+        return theta_like.select(pl.fold(acc=pl.lit(0), function=lambda acc, x: acc + x, exprs=pl.all()).alias(colname))
 
 
 @dataclass
@@ -245,8 +258,8 @@ class DPT(TimesSeriesPolars):
         return OptimizedPortfolio(
             weights=pl.DataFrame(ptf_weights),
             returns=pl.DataFrame(ptf_returns),
-            betas=ptf_betas,
-            alphas=ptf_alphas,
+            rawbetas=ptf_betas,
+            rawalphas=ptf_alphas,
             R=ptf_R,
             scaling_factor=scaling_factor,
         )

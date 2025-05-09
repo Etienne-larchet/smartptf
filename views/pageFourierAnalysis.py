@@ -17,7 +17,7 @@ class FourierPage(PageModel):
             heatmap(dpt.R, "Power Spectral Density", colormap=colormap)
             heatmap(dpt.coherence, "Coherence with index", colormap=colormap)
         with col2:
-            heatmap(dpt.logR, "Log returns", colormap=colormap, x=dpt.get("logR")["Date"])
+            heatmap(dpt.logR, "Log returns", colormap=colormap, xlabels=dpt.get("logR")["Date"])
 
 
 if __name__ == "__main__":

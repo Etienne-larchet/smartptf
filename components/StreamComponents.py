@@ -1,5 +1,6 @@
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 import polars as pl
 import streamlit as st
 
@@ -21,11 +22,29 @@ def heatmap(
     data: np.ndarray | pl.DataFrame,
     title: str,
     colormap: str | None = None,
-    x: list | None = None,
+    xlabels: list | None = None,
+    ylabels: list | None = None,
     controlable: bool = True,
 ) -> None:
     zmin, zmax = minmax_slider(data, title) if controlable else (None, None)
-    x = np.arange(1, len(data) + 1) if x is None else x
+    x_len, y_len = data.shape
+    xlabels = np.arange(1, x_len + 1) if xlabels is None else xlabels
+    ylabels = np.arange(1, y_len + 1) if ylabels is None else ylabels
     data_t = data.transpose()
-    fig = px.imshow(data_t, x=x, color_continuous_scale=colormap, zmin=zmin, zmax=zmax, aspect="auto", title=title)
+    fig = px.imshow(
+        data_t, x=xlabels, y=ylabels, color_continuous_scale=colormap, zmin=zmin, zmax=zmax, aspect="auto", title=title
+    )
     st.plotly_chart(fig, use_container_width=True)
+
+
+def treemap(data: pl.DataFrame, values_label: str):
+    data = data.unpivot(variable_name="cat", value_name=values_label)
+    fig = px.treemap(data, path=["cat"], values=values_label, color=values_label, color_continuous_scale="RdYlGn")
+    st.plotly_chart(fig)
+
+
+def piechart(data: pl.DataFrame, values_label: str, pull: float = 0.05):
+    data = data.unpivot(variable_name="cat", value_name=values_label)
+    pulls = np.repeat(pull, len(data))
+    fig = go.Figure(data=[go.Pie(labels=data["cat"], values=data[values_label], pull=pulls)])
+    st.plotly_chart(fig)
