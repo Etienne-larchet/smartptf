@@ -1,7 +1,7 @@
 import pytest
 
 from config.logging_config import configure_logging
-from models.Dpt import DPT
+from models.DPT.DptCls import DPT
 from models.Forecasting import Forecast
 from models.Load import MarketIndex, MarkKetIndexComponents
 

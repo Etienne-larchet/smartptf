@@ -65,16 +65,9 @@ class DPT(TimesSeriesPolars):
     def __post_init__(self):
         if self.data is None:
             raise ValueError("Data must be provided")
-        logger.info("Initializing DPT with provided data.")
-        self.data = self.data.with_columns(
-            (pl.col(col).log() - pl.col(col).log().shift(1)).alias(col.replace("_Close", "_logR"))
-            for col in self.data.columns
-            if col.endswith("Close")
-        )
-        sorted_columns = ["Date"] + sorted(self.get(include_date=False, include_index=True).columns)
-        self.data = self.data.select(sorted_columns)
+        self.calculate_logR()
         self.logR = self.get("logR", include_index=True, include_date=False)
-        logger.debug("Initializing DPT with provided data.")
+        logger.debug("DPT instancied.")
 
     def calculate_signals(self, T: int = 48, dt: int = 1):
         logger.info("Calculating signals with T=%d and dt=%d.", T, dt)

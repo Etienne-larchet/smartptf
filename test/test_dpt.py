@@ -2,7 +2,7 @@ import pytest
 from dotenv import load_dotenv
 
 from config.logging_config import configure_logging
-from models.Dpt import DPT
+from models.DPT.DptCls import DPT
 from models.Forecasting import Predict
 from models.Load import MarketIndex, MarkKetIndexComponents
 

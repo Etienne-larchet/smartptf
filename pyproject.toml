@@ -24,6 +24,8 @@ dependencies = [
     "statsforecast (>=2.0.1,<3.0.0)",
     "matplotlib (>=3.10.1,<4.0.0)",
     "gymnasium (>=1.1.1,<2.0.0)",
+    "stable-baselines3[extra] (>=2.6.0,<3.0.0)",
+    "sbx-rl (>=0.20.0,<0.21.0)",
 ]
 
 [tool.poetry]

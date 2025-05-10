@@ -4,7 +4,7 @@ import polars as pl
 import streamlit as st
 
 from components.PageModels import RenderWarning
-from models.Dpt import DPT, OptimizedPortfolio
+from models.DPT.DptCls import DPT, OptimizedPortfolio
 from models.Forecasting import Forecast
 from models.Load import MarketIndex
 from utils.polars import TimesSeriesPolars
