@@ -1,5 +1,6 @@
 import logging
 from dataclasses import dataclass, field
+from numbers import Number
 
 import numpy as np
 import polars as pl
@@ -67,10 +68,12 @@ class DPT(TimesSeriesPolars):
             raise ValueError("Data must be provided")
         self.calculate_logR()
         self.logR = self.get("logR", include_index=True, include_date=False)
+        if len(self.logR) == 0:
+            self.logR = self.get(include_index=True, include_date=False)  # In case only returns were provided
         logger.debug("DPT instancied.")
 
     def calculate_signals(self, T: int = 48, dt: int = 1):
-        logger.info("Calculating signals with T=%d and dt=%d.", T, dt)
+        logger.debug("Calculating signals with T=%d and dt=%d.", T, dt)
         fs = 1 / dt
         spectral_params = dict(fs=fs, nperseg=T, noverlap=T // 2, window="boxcar")
 
@@ -150,7 +153,7 @@ class DPT(TimesSeriesPolars):
             - `ptf_alphas`: Unsystematic risk coefficients for each period.
         - If the solver fails to find an optimal solution, a `ValueError` is raised with the solver's status.
         """
-        logger.info("Starting portfolio optimization")
+        logger.debug("Starting portfolio optimization")
         # --- 1. Variable transformations
         securities = self.csd.columns
 
@@ -159,13 +162,13 @@ class DPT(TimesSeriesPolars):
         sin_theta = self._wrap_polars_to_dict(self.sin_theta)
 
         K = range(1, self.R.shape[0] + 1)
-        if isinstance(C_betas, float | int):
+        if isinstance(C_betas, Number):
             C_betas = dict(zip(K, np.repeat(C_betas, len(K)), strict=True))
-        if isinstance(C_alphas, float | int):
+        if isinstance(C_alphas, Number):
             C_alphas = dict(zip(K, np.repeat(C_alphas, len(K)), strict=True))
-        if isinstance(L, float | int):
+        if isinstance(L, Number):
             L = dict(zip(securities, np.repeat(L, len(securities)), strict=True))
-        if isinstance(M, float | int):
+        if isinstance(M, Number):
             M = dict(zip(securities, np.repeat(M, len(securities)), strict=True))
 
         C_betas = {k: v / scaling_factor for k, v in C_betas.items()}
@@ -228,8 +231,8 @@ class DPT(TimesSeriesPolars):
         logger.debug("Linking constraints added for all securities.")
 
         # --- 6. Solve the Problem ---
-        logger.info("All constraints have been initialized.")
-        logger.info("Solving the optimization problem...")
+        logger.debug("All constraints have been initialized.")
+        logger.debug("Solving the optimization problem...")
         dpt_problem.solve()
 
         # --- 7. Results ---

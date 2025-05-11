@@ -10,7 +10,7 @@ configure_logging()
 
 @pytest.fixture
 def dpt():
-    components = MarkKetIndexComponents(csv_compo_path="test/data/sp500_compo_until_2025-03-10.csv")
+    components = MarkKetIndexComponents(csv_compo_path="data/index_compo/sp500_compo_until_2025-03-10.csv")
     compo = components.get_composition(date_ref="2020-01-01")
     sp500 = MarketIndex(name="SP500", compo=compo, date_end="2020-01-10", period="16y")
     sp500.load_from_csv()

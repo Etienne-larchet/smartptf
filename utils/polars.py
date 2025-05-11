@@ -15,7 +15,11 @@ class TimesSeriesPolars:
     index_ticker: str | None = None
 
     def get(
-        self, cat: TimesSeriesCol | None = None, include_index: bool = False, include_date: bool = True
+        self,
+        cat: TimesSeriesCol | None = None,
+        include_index: bool = False,
+        include_date: bool = True,
+        rename: bool = True,
     ) -> pl.DataFrame:
         query = cs.all()
         if not include_date:
@@ -26,7 +30,9 @@ class TimesSeriesPolars:
             query -= ~cs.ends_with(f"_{cat}") & ~cs.date()
 
         result = self.data.select(query).drop_nulls()
-        return result.rename({col: col.replace(f"_{cat}", "") for col in result.columns})
+        if rename:
+            return result.rename({col: col.replace(f"_{cat}", "") for col in result.columns})
+        return result
 
     def calculate_logR(self, enforce: bool = False) -> None:
         if any(col.endswith("_logR") for col in self.data.columns) and not enforce:
