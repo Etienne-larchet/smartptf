@@ -6,3 +6,4 @@ from dateutil.relativedelta import relativedelta
 
 from .DptCls import DPT, OptimizedPortfolio
 from .gymEnv import DPTEnv
+from .TensorboardCallBack import TensorboardCallBack

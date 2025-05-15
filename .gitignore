@@ -61,6 +61,7 @@ debug.log
 # Environment variables
 .env
 .envrc
+*.zip
 
 # Streamlit
 .streamlit/*

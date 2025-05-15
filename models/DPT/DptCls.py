@@ -233,7 +233,7 @@ class DPT(TimesSeriesPolars):
         # --- 6. Solve the Problem ---
         logger.debug("All constraints have been initialized.")
         logger.debug("Solving the optimization problem...")
-        dpt_problem.solve()
+        dpt_problem.solve(plp.PULP_CBC_CMD(msg=False, options=['logLevel=0']))
 
         # --- 7. Results ---
         if dpt_problem.status != plp.LpStatusOptimal:

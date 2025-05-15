@@ -18,24 +18,25 @@ from utils.polars import sliding_window
 logger = logging.getLogger(__name__)
 
 START_DATE = date(2021, 1, 31)
-DISCOUNT_FACTOR = 0.035
+DISCOUNT_FACTOR = 0.06
 START_AMOUNT = 1000.0
-LIAB_NB_MIN = 6
-LIAB_NB_MAX = 10
+LIAB_NB_MIN = 3
+LIAB_NB_MAX = 12
 LIAB_DELTA_MIN = 2
-LIAB_DELTA_MAX = 15
-LIAB_PERC_RETURN = 1.4
+LIAB_DELTA_MAX = 36
+LIAB_PERC_RETURN = 1.9
+MAX_RETRY = 8
 
 
 class DPTEnv(gym.Env):
     DPT_WINDOW: int = 194  # ie: 12months *16years + 1month (for logR) + 1month for forecasting
 
-    def __init__(self, full_returns: pl.DataFrame, index_ticker: str, liabilities_window: int = 5):
+    def __init__(self, full_returns: pl.DataFrame, index_ticker: str, liabilities_window_size: int = 5):
         super().__init__()
         self.full_returns: pl.DataFrame = full_returns
         self.index_ticker: str = index_ticker
 
-        self.liabilities_window: int = liabilities_window  # Number of liabilities visible simultaneously by the agent
+        self.liabilities_window_size: int = liabilities_window_size  # Number of liabilities visible simultaneously by the agent
 
         # internal attributes
         self.liabilities: np.ndarray[np.float32] | None = None
@@ -45,18 +46,24 @@ class DPTEnv(gym.Env):
         self.start_amount: Number | None = None
         self.ptf_value: Number | None = None
         self.dpt: DPT | None = None
-        self.info: dict[str, Any] = {}
+        self.std_betas: np.float32 | None = None
+        self.std_alphas: np.float32 | None = None
+        self.betas_sum: np.float32 | None = None
+        self.alphas_sum: np.float32 | None = None
+        self.ptf_arithmetic_return: Number | None = None
         self.discount_factor_m: Number | None = None  # discount factor to apply to futures liabilities
-        self.retry_step: bool = False  # Catch non feaseable solution in the DPT framework
+        self.retry_count: int | None = None  # Catch non feaseable solution in the DPT framework
+        self.total_retry: int | None = None
 
         # --- Action space ---
         # (min, max)
-        S = (5, 50)
+        S = (5, 25)
         L = (0.01, 0.2)
         M = (0.05, 0.4)
-        betas = ([0.45] * 24, [2.0] * 24)
-        alphas = ([0.15] * 24, [1.0] * 24)
+        betas = ([0.3] * 24, [2.0] * 24)
+        alphas = ([0.3] * 24, [1.0] * 24)
 
+        #TODO: Change environment observation_space from dict to box to use SPX
         self.action_space = spaces.Box(
             low=np.array([S[0], L[0], M[0], *betas[0], *alphas[0]], dtype=np.float32),
             high=np.array([S[1], L[1], M[1], *betas[1], *alphas[1]], dtype=np.float32),
@@ -68,42 +75,54 @@ class DPTEnv(gym.Env):
             {
                 "ptf_value": spaces.Box(low=0, high=np.inf, shape=(1,), dtype=np.float32),
                 "liabilities": spaces.Box(
-                    low=-np.inf, high=np.inf, shape=(self.liabilities_window, 2), dtype=np.float32
+                    low=-np.inf, high=np.inf, shape=(self.liabilities_window_size, 2), dtype=np.float32
                 ),
+                "R": spaces.Box(low=0, high=np.inf, shape=(24, full_returns.shape[1] -2), dtype=np.float32), # -2 due to index and date col  # noqa: E501
+                "cos_theta": spaces.Box(low=0, high=np.inf, shape=(24, full_returns.shape[1] -2), dtype=np.float32), # see above
+                "sin_theta": spaces.Box(low=0, high=np.inf, shape=(24, full_returns.shape[1] -2), dtype=np.float32), # see above
             }
         )
         logger.info("Initialisation completed.")
 
     def step(self, action: np.array):
         params = self._transform_action(action)
-        if not self.retry_step:
+        future_returns = self.sliding_returns[-1].to_dicts()[0]
+
+        val_betas = np.fromiter(params['C_betas'].values(), dtype=np.float32)
+        val_alphas = np.fromiter(params['C_alphas'].values(), dtype=np.float32)
+        self.std_betas = val_betas.std()
+        self.std_alphas = val_alphas.std() 
+        self.betas_sum = val_betas.sum()
+        self.alphas_sum = val_alphas.sum()
+        
+        try:
+            optptf: OptimizedPortfolio = self.dpt.solve(mu=future_returns, **params)
+            self.retry_count = 0 # Reset counter if optimal solution found
+        except ValueError as e:
+            self.retry_count += 1
+            self.total_retry += 1
+            logger.warning(e)
+            reward = -self.retry_count/3
+            truncated = True if self.retry_count > MAX_RETRY else False
+            terminated = False
+            return self._get_obs(), reward, terminated, truncated, self._get_info()
+
+        if self.retry_count == 0: # First try of step
             try:
+                obs_returns = self.sliding_returns[:-1]
+                self.dpt = DPT(data=obs_returns, index_ticker=self.index_ticker)
+                self.dpt.calculate_signals()
                 self.sliding_returns = next(self.returns_slider)
             except StopIteration:
                 raise RuntimeError("No more sliding returns available.") from None
-            obs_returns = self.sliding_returns[:-1]
-            self.dpt = DPT(data=obs_returns, index_ticker=self.index_ticker)
-            self.dpt.calculate_signals()
-
-        future_returns = self.sliding_returns[-1].to_dicts()[0]
-        try:
-            optptf: OptimizedPortfolio = self.dpt.solve(mu=future_returns, **params)
-            self.retry_step = False
-        except ValueError as e:
-            self.retry_step = True
-            logger.warning(e)
-            reward = -10
-            terminated = False
-            self.info["status"] = 0
-            return self._get_obs(), reward, terminated, False, self.info
-
+                
         # Update PTF value
         # --- Handle liabilities that have matured (months remaining == 0) ---
         if (current_liab := self.liabilities[self.liabilities[:, 0] == 0]).size > 0:
             self.ptf_value += current_liab[:, 1].sum()
 
-        ptf_arithmetic_return = np.exp(optptf.ptf_return) - 1  # log return -> arithmetic return
-        self.ptf_value *= 1 + ptf_arithmetic_return
+        self.ptf_arithmetic_return = np.exp(optptf.ptf_return) - 1  # log return -> arithmetic return
+        self.ptf_value *= 1 + self.ptf_arithmetic_return
 
         # Decrement liabilities (time to maturity decreases by 1 month)
         self.liabilities += self.decrementer
@@ -121,13 +140,7 @@ class DPTEnv(gym.Env):
         else:
             terminated = False
         # Return the updated observation, reward, done flag, and info
-        self.info = {
-            "status": 1,
-            "ptf_value": self.ptf_value,
-            "step_return": ptf_arithmetic_return,
-            "remaining_liabilities": self.liabilities[:, 1].sum(),
-        }
-        return self._get_obs(), reward, terminated, False, self.info
+        return self._get_obs(), reward, terminated, False, self._get_info()
 
     def reset(self, seed: int | None = None, options: dict = None):
         super().reset(seed=seed)
@@ -135,12 +148,19 @@ class DPTEnv(gym.Env):
         options = options or {}
         self.start_amount = options.get("start_amount", START_AMOUNT)
         self.ptf_value = self.start_amount
-
+        self.total_retry = 0
+        self.retry_count = 0
         discount_factor_annual = options.get("discount_factor", DISCOUNT_FACTOR)
         self.discount_factor_m = (1 + discount_factor_annual) ** (1 / 12) - 1
+
         # TODO: add a random date generator respecting available data constraints (past>16years)
         start_date = options.get("start_date", START_DATE)
         self.returns_slider = sliding_window(self.full_returns, start_date, self.DPT_WINDOW)
+
+        self.sliding_returns = next(self.returns_slider)
+        obs_returns = self.sliding_returns[:-1]
+        self.dpt = DPT(data=obs_returns, index_ticker=self.index_ticker) # Duplicate code to give agent R array at step 0
+        self.dpt.calculate_signals()
 
         liabilities_dict = options.get(
             "liabilities",
@@ -151,17 +171,16 @@ class DPTEnv(gym.Env):
                 nb_min=LIAB_NB_MIN,
                 nb_max=LIAB_NB_MAX,
                 seed=seed,
-            ),
+            ), 
         )
         self.liabilities = self._dict_liabilities_to_observation(liabilities_dict, start_date)
         self.decrementer = np.array([-1.0, 0.0] * len(self.liabilities)).reshape(-1, 2)
+
         return self._get_obs(), {}
 
     def render(self, mode="human"):
-        logger.info(f"Portfolio Value-: {self.ptf_value}")
-        logger.info(f"Discounted Liabilities left: {self._get_discounted_liab_val()}")
-        logger.info(f"Next liability: {self.liabilities[self.liabilities[:, 0] >= 0][0]}")
-        logger.info(f"Months lefts: {self.liabilities[-1, 0]}")
+        for k, v in self._get_info().items():
+            logger.info(f'{k}: {v}')
 
     def seed(self, seed: int | None = None):
         random.seed(seed)
@@ -172,44 +191,65 @@ class DPTEnv(gym.Env):
         return (liab_left[:, 1] / (1 + self.discount_factor_m) ** liab_left[:, 0]).sum()
 
     def _calculate_reward(self, optptf: OptimizedPortfolio) -> float:
-        reward = 0.0
         # 1. Portfolio return
-        reward += 10 * (1 + optptf.ptf_return)
-        discounted_liab_val = self._get_discounted_liab_val()
+        reward = 8 * (1 + optptf.ptf_return)
         # 2. Liabilities management penalty
-        if (pnl := self.ptf_value + discounted_liab_val) < 0:
-            reward -= pnl / 10  # Penalize unmet liabilities
+        pnl = self.ptf_value + self._get_discounted_liab_val()
+        reward += pnl / 8
         # 3. Survival bonus
         brut_return = self.ptf_value / self.start_amount
         if brut_return < 0.5:
-            reward -= 100
-        elif brut_return < 0.8:
             reward -= 50
-        elif brut_return < 1:
+        elif brut_return < 0.8:
             reward -= 20
+        elif brut_return < 1:
+            reward -= 10
         elif brut_return < 1.2:
             reward += 20
         elif brut_return > 1.4:
-            reward += 30
+            reward += 40
 
-        # TODO: add reward for high variance between C_betas and C_alphas
+        reward -= self.liabilities[-1, 0] # encourages the survival until maturity of the last liability
+        std = (self.std_betas + (self.std_alphas *2)) *3 # To leverage control of periodic risk
+        reward += std
+        reward -= self.betas_sum *2
+        reward -= self.alphas_sum *2
         return reward
 
     def _get_obs(self) -> dict[str, np.ndarray[np.float32]]:
         # Filter liabilities that are still in view (positive months remaining)
-        inview_liab = self.liabilities[self.liabilities[:, 0] > 0][: self.liabilities_window]
+        inview_liab = self.liabilities[self.liabilities[:, 0] > 0][: self.liabilities_window_size]
 
         # Pad liabilities
-        padding = np.zeros((max(0, self.liabilities_window - len(inview_liab)), 2))
+        padding = np.zeros((max(0, self.liabilities_window_size - len(inview_liab)), 2))
         obs_liab = np.concatenate((inview_liab, padding), axis=0, dtype=np.float32)
 
-        logger.info(f"ptf_value shape: {np.array([self.ptf_value], dtype=np.float32).shape}")
-        logger.info(f"liabilities shape: {obs_liab.shape}")
-
         # Return the observation as a dictionary
-        observation = {"ptf_value": np.array([self.ptf_value], dtype=np.float32), "liabilities": obs_liab}
-        # TODO: Add and returns csd to observation
+        observation = {
+            "ptf_value": np.array([self.ptf_value], dtype=np.float32), 
+            "liabilities": obs_liab,
+            'R': self.dpt.R.to_numpy().astype(np.float32),
+            'cos_theta':self.dpt.cos_theta.to_numpy().astype(np.float32),
+            'sin_theta':self.dpt.sin_theta.to_numpy().astype(np.float32),
+        }
         return observation
+
+    def _get_info(self) -> dict[str, Any]:
+        info = {
+            "total_retry": self.total_retry, # count the total number of infeaseable solutions per episode
+            'retry_count': self.retry_count,
+            "ptf_value": self.ptf_value,
+            "step_return": self.ptf_arithmetic_return,
+            "liabilities_sum": self.liabilities[:, 1].sum(),
+            'discounted_liabilities_sum': self._get_discounted_liab_val(),
+            'betas_std': self.std_betas,
+            'alphas_std': self.std_alphas,
+            'betas_sum': self.betas_sum,
+            'alphas_sum': self.alphas_sum,
+            'months_left': self.liabilities[-1, 0],
+            'next_liability': self.liabilities[self.liabilities[:, 0] >= 0][0],
+        }
+        return info
 
     def _transform_action(self, action: np.array) -> dict[str, Any]:
         if len(action) != 3 + 24 + 24:  # S, L, M, 24 betas, 24 alphas
